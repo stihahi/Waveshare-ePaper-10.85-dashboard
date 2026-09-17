@@ -109,11 +109,11 @@ if os.path.exists(LIB_DIR):
 
 from waveshare_epd_g import epd10in85g
 from panel_frame import PANEL_HEIGHT, PANEL_WIDTH, WHITE, build_frame
-from dgx_spark import GpuUnavailable, query_gpu_status
+from dgx_spark import GpuUnavailable, NodeMetrics, query_node_metrics
 from usage_status import claude_usage_failed, codex_usage_failed
 import gmail_auth
 from usage_widgets import (draw_claude_accounts_widget, draw_codex_accounts_widget, draw_dgx_spark_widget,
-                           draw_usage_bar, time_until)
+                           draw_usage_bar, draw_vllm_widget, time_until)
 
 try:
     import bambulabs_api as bl
@@ -227,7 +227,7 @@ class DataStore:
         self.claude = {account: {'error': True} for account in CLAUDE_ACCOUNTS}
         self.antigravity = {'error': False, 'models': []}
         self.codex = {account: {'error': True} for account in CODEX_ACCOUNTS}
-        self.dgx_spark = {label: GpuUnavailable.PENDING for label in DGX_SPARK_HOSTS}
+        self.dgx_spark = {label: NodeMetrics(gpu=GpuUnavailable.PENDING) for label in DGX_SPARK_HOSTS}
         self.roborock = {
             'status': 'OFFLINE', 'battery': 0, 'is_cleaning': False,
             'current_area': 0.0, 'ref_area': 0.0, 'pct': 0.0, 'last_date': '-'
@@ -582,8 +582,8 @@ def update_data_thread():
 
         if ENABLE_DGX_SPARK and now - data_store.last_update['dgx_spark'] > 240:
             for label, host in DGX_SPARK_HOSTS.items():
-                status = query_gpu_status(host)
-                with data_store.lock: data_store.dgx_spark[label] = status
+                metrics = query_node_metrics(host)
+                with data_store.lock: data_store.dgx_spark[label] = metrics
             data_store.last_update['dgx_spark'] = now
 
         if now - data_store.last_update['weather'] > 600:
@@ -828,6 +828,11 @@ def get_weather_icon(code, is_day=1):
     return "icon_sun"
 
 
+def vllm_node(nodes):
+    serving = [node for node in nodes.values() if node.vllm is not None]
+    return serving[0] if serving else NodeMetrics(gpu=GpuUnavailable.OFFLINE)
+
+
 def render_screen(fonts):
     Himage = Image.new('RGB', (PANEL_WIDTH, PANEL_HEIGHT), WHITE)
     draw = ImageDraw.Draw(Himage)
@@ -860,7 +865,7 @@ def render_screen(fonts):
     # Widget 1: DGX Spark, Strava or SysLoad
     y1 = 20
     if ENABLE_DGX_SPARK:
-        draw_dgx_spark_widget(draw, fonts, col1_x, y1, dgx_spark)
+        draw_dgx_spark_widget(draw, fonts, col1_x, y1, {label: node.gpu for label, node in dgx_spark.items()})
     elif ENABLE_STRAVA:
         draw_icon(draw, col1_x, y1, "icon_strava", (60, 60))
         draw.text((col1_x + 70, y1), "STRAVA STATS", font=fonts['28'], fill=0)
@@ -1118,6 +1123,9 @@ def render_screen(fonts):
             track = words[1] if len(words) > 1 else ""
             draw.text((col3_x + 180, sp_y + 10), artist[:20], font=fonts['28'], fill=0)
             draw.text((col3_x + 140, sp_y + 50), track[:25], font=fonts['24'], fill=0)
+
+    elif ENABLE_DGX_SPARK:
+        draw_vllm_widget(draw, fonts, col3_x, sp_y, vllm_node(dgx_spark))
 
     else:
         # Fallback: Time Progress

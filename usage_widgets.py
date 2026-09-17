@@ -58,6 +58,28 @@ def _draw_gpu_row(draw, fonts, x, y, label, status):
     draw_usage_bar(draw, x, y + 28, 400, status.utilization_pct)
 
 
+def draw_vllm_widget(draw, fonts, x, y, node):
+    draw.text((x, y), f"VLLM  {_short_model_name(node.model)}", font=fonts['24'], fill=BLACK)
+    if node.vllm is None:
+        draw.text((x, y + 40), "engine offline", font=fonts['20'], fill=BLACK)
+        return
+    _draw_engine_load(draw, fonts, x, y + 36, node.vllm)
+    draw.text((x, y + 64), f"KV cache {round(node.vllm.kv_cache_pct)}%", font=fonts['20'], fill=BLACK)
+    draw_usage_bar(draw, x, y + 92, 400, node.vllm.kv_cache_pct)
+
+
+def _draw_engine_load(draw, fonts, x, y, stats):
+    draw.text((x, y), f"{stats.generation_throughput:.1f} tok/s   run {stats.running}", font=fonts['20'], fill=BLACK)
+    queued_color = RED if stats.waiting > 0 else BLACK
+    draw.text((x + 300, y), f"wait {stats.waiting}", font=fonts['20'], fill=queued_color)
+
+
+def _short_model_name(model):
+    if not model:
+        return "no model"
+    return model.rsplit("/", 1)[-1]
+
+
 def draw_claude_accounts_widget(draw, fonts, x, y, usages):
     draw.text((x, y), "CLAUDE USAGE  5h / 7d", font=fonts['28'], fill=BLACK)
     for row, (account, usage) in enumerate(usages.items()):
