@@ -1,0 +1,17 @@
+# Secrets: OAuth tokens and client credentials
+credentials.json
+token.json
+claude_creds*.json
+codex_auth*.json
+auth.json
+strava_token.json
+roborock_session.pkl
+
+# Runtime output
+claude_usage*.json
+codex_usage*.json
+usage.json
+limits.json
+roborock_stats.json
+*.log
+__pycache__/

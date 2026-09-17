@@ -9,14 +9,15 @@ import base64
 import secrets
 import time
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone
 import requests
 
+from accounts import account_file, account_from_argv
+
 # --- Configuration ---
 SCRIPT_DIR = Path(__file__).parent.resolve()
-CREDENTIALS_FILE = SCRIPT_DIR / "claude_creds.json"
-USAGE_FILE = SCRIPT_DIR / "usage.json"
 LOG_FILE = SCRIPT_DIR / "claude_monitor.log"
 
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e" # Public
@@ -39,6 +40,19 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class ClaudeAccountFiles:
+    credentials: Path
+    usage: Path
+
+
+def account_files(account: str) -> ClaudeAccountFiles:
+    return ClaudeAccountFiles(
+        credentials=account_file("claude_creds", account),
+        usage=account_file("claude_usage", account),
+    )
+
+
 def generate_pkce():
     verifier = secrets.token_urlsafe(64)[:128]
     digest = hashlib.sha256(verifier.encode("ascii")).digest()
@@ -50,18 +64,18 @@ def generate_state():
     return secrets.token_urlsafe(32)
 
 
-def load_credentials() -> dict | None:
-    if CREDENTIALS_FILE.exists():
+def load_credentials(files: ClaudeAccountFiles) -> dict | None:
+    if files.credentials.exists():
         try:
-            return json.loads(CREDENTIALS_FILE.read_text())
+            return json.loads(files.credentials.read_text())
         except (json.JSONDecodeError, OSError):
             return None
     return None
 
 
-def save_credentials(creds: dict):
-    CREDENTIALS_FILE.write_text(json.dumps(creds, indent=2))
-    os.chmod(CREDENTIALS_FILE, 0o600)
+def save_credentials(creds: dict, files: ClaudeAccountFiles):
+    files.credentials.write_text(json.dumps(creds, indent=2))
+    os.chmod(files.credentials, 0o600)
 
 
 def token_is_expired(creds: dict) -> bool:
@@ -70,9 +84,10 @@ def token_is_expired(creds: dict) -> bool:
     return now_ms >= (expires_at - REFRESH_BUFFER_SEC * 1000)
 
 
-def interactive_auth() -> bool:
+def interactive_auth(account: str) -> bool:
     """Interactive authorization flow for the main script setup."""
-    if load_credentials():
+    files = account_files(account)
+    if load_credentials(files):
         return True
 
     verifier, challenge = generate_pkce()
@@ -90,11 +105,11 @@ def interactive_auth() -> bool:
     auth_url = AUTHORIZE_URL + "?" + "&".join(f"{k}={v}" for k, v in params.items())
 
     print("\n" + "=" * 60)
-    print("  CLAUDE AI AUTHORIZATION REQUIRED")
+    print(f"  CLAUDE AI AUTHORIZATION REQUIRED (account: {account})")
     print("=" * 60)
     print("\n1. Open this URL in any browser:\n")
     print(f"   {auth_url}\n")
-    print("2. Log in with your Claude account.")
+    print(f"2. Log in with the Claude account for '{account}'.")
     print("3. After login, copy the FULL URL from the browser address bar.")
     print("   (It will look like http://localhost:18924/callback?code=...&state=...)\n")
 
@@ -143,15 +158,15 @@ def interactive_auth() -> bool:
             "scopes": data.get("scope", SCOPES).split(),
         }
 
-        save_credentials(creds)
-        print("Claude Authorization Successful!\n")
+        save_credentials(creds, files)
+        print(f"Claude Authorization Successful for '{account}'!\n")
         return True
     except Exception as e:
         print(f"Failed to fetch Claude tokens: {e}")
         return False
 
 
-def refresh_access_token(creds: dict) -> dict | None:
+def refresh_access_token(creds: dict, files: ClaudeAccountFiles) -> dict | None:
     refresh_token = creds.get("refreshToken") or creds.get("refresh_token")
     if not refresh_token:
         log.error("No refresh token found in credentials.")
@@ -172,7 +187,7 @@ def refresh_access_token(creds: dict) -> dict | None:
         creds["expiresAt"] = int(time.time() * 1000) + data.get("expires_in", 28800) * 1000
         if "refresh_token" in data:
             creds["refreshToken"] = data["refresh_token"]
-        save_credentials(creds)
+        save_credentials(creds, files)
         return creds
     except requests.RequestException as e:
         log.error(f"Network error during refresh: {e}")
@@ -204,7 +219,7 @@ def fetch_usage(access_token: str) -> dict | None:
         return None
 
 
-def save_usage(raw: dict):
+def save_usage(raw: dict, files: ClaudeAccountFiles):
     five = raw.get("five_hour")
     seven = raw.get("seven_day")
     output = {
@@ -218,31 +233,36 @@ def save_usage(raw: dict):
             "resets_at": seven.get("resets_at") if seven else None,
         },
     }
-    USAGE_FILE.write_text(json.dumps(output, indent=2))
+    files.usage.write_text(json.dumps(output, indent=2))
+
+
+def save_usage_error(reason: str, files: ClaudeAccountFiles):
+    files.usage.write_text(json.dumps({"error": reason}, indent=2))
 
 
 def main():
-    creds = load_credentials()
+    files = account_files(account_from_argv(sys.argv))
+    creds = load_credentials(files)
     if not creds:
         log.error("No credentials. Run main script to authenticate first.")
         sys.exit(1)
 
     if token_is_expired(creds):
-        creds = refresh_access_token(creds)
+        creds = refresh_access_token(creds, files)
         if not creds:
-            USAGE_FILE.write_text(json.dumps({"error": "token_refresh_failed"}, indent=2))
+            save_usage_error("token_refresh_failed", files)
             sys.exit(1)
 
     raw = fetch_usage(creds.get("accessToken"))
     if raw is None:
-        creds = refresh_access_token(creds)
+        creds = refresh_access_token(creds, files)
         if creds:
             raw = fetch_usage(creds.get("accessToken"))
 
     if raw:
-        save_usage(raw)
+        save_usage(raw, files)
     else:
-        USAGE_FILE.write_text(json.dumps({"error": "fetch_failed"}, indent=2))
+        save_usage_error("fetch_failed", files)
 
 
 if __name__ == "__main__":
