@@ -24,7 +24,7 @@ from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageEnhance
 from logging.handlers import RotatingFileHandler
 
-from location import Location, load_location
+from local_config import LocalConfig, Location, load_local_config
 
 # --- GMAIL IMPORTS ---
 from googleapiclient.discovery import build
@@ -68,8 +68,12 @@ API_ENDPOINTS = {
 }
 
 # --- CONFIGURATION ---
-DEFAULT_LOCATION = Location(latitude=44.8140857, longitude=20.3934271)
-LOCATION = load_location(os.path.join(BASE_DIR, 'location.json'), DEFAULT_LOCATION)
+# Personal values (home coordinates, DGX hosts) live in the untracked local_config.json.
+DEFAULT_LOCAL_CONFIG = LocalConfig(location=Location(latitude=44.8140857, longitude=20.3934271),
+                                   dgx_spark_hosts={})
+LOCAL_CONFIG = load_local_config(os.path.join(BASE_DIR, 'local_config.json'), DEFAULT_LOCAL_CONFIG)
+LOCATION = LOCAL_CONFIG.location
+DGX_SPARK_HOSTS = LOCAL_CONFIG.dgx_spark_hosts
 
 PRINTER_CONF = {
     'IP': '192.168....',
@@ -84,12 +88,6 @@ ROBOROCK_CONF = {
 LASTFM_CONF = {
     'API_KEY': '...',
     'USERNAME': 'your_name'
-}
-
-# Display label -> SSH host (Pi's ssh key must be authorized on each host)
-DGX_SPARK_HOSTS = {
-    'dgx1': 'spark-8158',
-    'dgx2': 'spark-f862',
 }
 
 # Account names are shown on screen and name the per-account token files.
