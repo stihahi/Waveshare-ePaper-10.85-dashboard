@@ -53,9 +53,17 @@ def delay_ms(milliseconds):
     time.sleep(milliseconds / 1000.0)
 
 
+class ModuleInitError(RuntimeError):
+    pass
+
+
 def module_init():
-    _native.DEV_ModuleInit()
+    if _native.DEV_ModuleInit() != 0:
+        raise ModuleInitError("DEV_ModuleInit failed (bcm2835_init could not map GPIO)")
 
 
 def module_exit():
     _native.DEV_ModuleExit()
+    # Waveshare's DEV_ModuleExit never unmaps /dev/gpiomem; each unreleased
+    # init leaks 32MB of address space until mmap fails on 32-bit Pis.
+    _native.bcm2835_close()

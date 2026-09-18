@@ -3,6 +3,7 @@
 import sys
 import os
 import time
+import errno
 import logging
 import threading
 import requests
@@ -1168,9 +1169,7 @@ def render_screen(fonts):
 def show_frame(epd, frame):
     logging.info("Full refresh")
     signal.alarm(PANEL_REFRESH_TIMEOUT_SECONDS)
-    epd.init()
-    epd.display(frame)
-    epd.sleep()
+    epd.show(frame)
     signal.alarm(0)
 
 
@@ -1230,8 +1229,9 @@ def main():
                 os.execv(sys.executable, ['python'] + sys.argv)
             except OSError as e:
                 signal.alarm(0)
-                if e.errno == 24:
+                if e.errno == errno.EMFILE:
                     os.execv(sys.executable, ['python'] + sys.argv)
+                logging.error(f"OS error in main: {e}")
             except Exception as e:
                 signal.alarm(0)
                 logging.error(f"Unexpected error in main: {e}")

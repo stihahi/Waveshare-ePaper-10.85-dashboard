@@ -37,8 +37,16 @@ DISPLAY_REFRESH = 0x12
 
 
 class EPD:
-    def init(self):
+    def show(self, frame):
         epdconfig.module_init()
+        try:
+            self._power_on()
+            self._display(frame)
+            self._power_off()
+        finally:
+            epdconfig.module_exit()
+
+    def _power_on(self):
         self._reset()
         self._wait_until_idle()
         self._select_both()
@@ -50,7 +58,7 @@ class EPD:
         self._wait_until_idle()
         self._release_both()
 
-    def display(self, frame):
+    def _display(self, frame):
         self._transmit_to(epdconfig.CS_M_PIN, frame.master)
         self._transmit_to(epdconfig.CS_S_PIN, frame.slave)
         self._select_both()
@@ -58,14 +66,13 @@ class EPD:
         self._release_both()
         self._wait_until_idle()
 
-    def sleep(self):
+    def _power_off(self):
         self._select_both()
         self._send(POWER_OFF, (0x00,))
         epdconfig.delay_ms(100)
         self._send(DEEP_SLEEP, (DEEP_SLEEP_CHECK_CODE,))
         self._release_both()
         epdconfig.delay_ms(2000)
-        epdconfig.module_exit()
 
     def _reset(self):
         for level, wait_ms in ((1, 200), (0, 2), (1, 200)):
