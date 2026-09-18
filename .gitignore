@@ -7,6 +7,9 @@ auth.json
 strava_token.json
 roborock_session.pkl
 
+# Personal config: home coordinates for the weather widget
+location.json
+
 # Runtime output
 claude_usage*.json
 codex_usage*.json

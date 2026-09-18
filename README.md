@@ -65,6 +65,12 @@ sudo apt install -y python3-gpiozero python3-lgpio python3-spidev
 
 All widget toggles and API configurations are located at the top of the `main.py` script. You can enable or disable specific widgets using the `ENABLE_*` boolean variables.
 
+### Weather location
+Create `location.json` next to `main.py` so your home coordinates stay out of git (it is listed in `.gitignore`). Without it the weather widget falls back to the default location in `main.py`.
+```json
+{"latitude": 44.8140857, "longitude": 20.3934271}
+```
+
 ### Codex (ChatGPT)
 1. Codex limits are read from the official OpenAI Codex CLI tokens — unlike Claude, the dashboard does not run its own browser login flow.
 2. Install the Codex CLI (for example `npm install -g @openai/codex`) and run codex login in the terminal.

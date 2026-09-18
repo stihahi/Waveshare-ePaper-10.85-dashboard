@@ -24,6 +24,8 @@ from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageEnhance
 from logging.handlers import RotatingFileHandler
 
+from location import Location, load_location
+
 # --- GMAIL IMPORTS ---
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
@@ -66,8 +68,8 @@ API_ENDPOINTS = {
 }
 
 # --- CONFIGURATION ---
-LOCATION_LAT = 44.8140857
-LOCATION_LON = 20.3934271
+DEFAULT_LOCATION = Location(latitude=44.8140857, longitude=20.3934271)
+LOCATION = load_location(os.path.join(BASE_DIR, 'location.json'), DEFAULT_LOCATION)
 
 PRINTER_CONF = {
     'IP': '192.168....',
@@ -588,8 +590,8 @@ def update_data_thread():
             data_store.last_update['dgx_spark'] = now
 
         if now - data_store.last_update['weather'] > 600:
-            weather_url = f"{API_ENDPOINTS['weather']}?latitude={LOCATION_LAT}&longitude={LOCATION_LON}&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,wind_direction_10m,weather_code,is_day,uv_index&hourly=temperature_2m,precipitation_probability,weather_code,cloud_cover&timezone=auto&forecast_days=2"
-            aqi_url = f"{API_ENDPOINTS['aqi']}?latitude={LOCATION_LAT}&longitude={LOCATION_LON}&current=european_aqi&timezone=auto"
+            weather_url = f"{API_ENDPOINTS['weather']}?latitude={LOCATION.latitude}&longitude={LOCATION.longitude}&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,wind_direction_10m,weather_code,is_day,uv_index&hourly=temperature_2m,precipitation_probability,weather_code,cloud_cover&timezone=auto&forecast_days=2"
+            aqi_url = f"{API_ENDPOINTS['aqi']}?latitude={LOCATION.latitude}&longitude={LOCATION.longitude}&current=european_aqi&timezone=auto"
             w_data = net.get_json(weather_url)
             a_data = net.get_json(aqi_url)
             with data_store.lock:
