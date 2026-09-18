@@ -65,6 +65,15 @@ sudo apt install -y python3-gpiozero python3-lgpio python3-spidev
 
 All widget toggles and API configurations are located at the top of the `main.py` script. You can enable or disable specific widgets using the `ENABLE_*` boolean variables.
 
+### Local config (location & DGX Spark hosts)
+Create `local_config.json` next to `main.py` so personal values stay out of git (it is listed in `.gitignore`). `location` sets the weather/AQI coordinates, and `dgx_spark_hosts` maps each on-screen label to an SSH host the Pi can reach with its key. Either section may be omitted: a missing location falls back to the default in `main.py`, and missing hosts leave the DGX Spark widget empty.
+```json
+{
+  "location": {"latitude": 44.8140857, "longitude": 20.3934271},
+  "dgx_spark_hosts": {"dgx1": "spark-host-1", "dgx2": "spark-host-2"}
+}
+```
+
 ### Codex (ChatGPT)
 1. Codex limits are read from the official OpenAI Codex CLI tokens — unlike Claude, the dashboard does not run its own browser login flow.
 2. Install the Codex CLI (for example `npm install -g @openai/codex`) and run codex login in the terminal.

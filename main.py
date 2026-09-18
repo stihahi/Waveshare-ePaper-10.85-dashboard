@@ -3,6 +3,7 @@
 import sys
 import os
 import time
+import errno
 import logging
 import threading
 import requests
@@ -19,9 +20,11 @@ import math
 import calendar
 import urllib.parse
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageEnhance
 from logging.handlers import RotatingFileHandler
+
+from local_config import LocalConfig, Location, load_local_config
 
 # --- GMAIL IMPORTS ---
 from googleapiclient.discovery import build
@@ -47,9 +50,10 @@ ENABLE_STRAVA = False # For payed tier only
 ENABLE_BAMBU = False
 ENABLE_ROBOROCK = False
 ENABLE_ANTIGRAVITY = False
-ENABLE_CODEX = False
-ENABLE_CLAUDE = False
+ENABLE_CODEX = True
+ENABLE_CLAUDE = True
 ENABLE_SPOTIFY = False
+ENABLE_DGX_SPARK = True
 
 # --- API ENDPOINTS ---
 API_ENDPOINTS = {
@@ -64,8 +68,12 @@ API_ENDPOINTS = {
 }
 
 # --- CONFIGURATION ---
-LOCATION_LAT = 44.8140857
-LOCATION_LON = 20.3934271
+# Personal values (home coordinates, DGX hosts) live in the untracked local_config.json.
+DEFAULT_LOCAL_CONFIG = LocalConfig(location=Location(latitude=44.8140857, longitude=20.3934271),
+                                   dgx_spark_hosts={})
+LOCAL_CONFIG = load_local_config(os.path.join(BASE_DIR, 'local_config.json'), DEFAULT_LOCAL_CONFIG)
+LOCATION = LOCAL_CONFIG.location
+DGX_SPARK_HOSTS = LOCAL_CONFIG.dgx_spark_hosts
 
 PRINTER_CONF = {
     'IP': '192.168....',
@@ -82,12 +90,17 @@ LASTFM_CONF = {
     'USERNAME': 'your_name'
 }
 
+# Account names are shown on screen and name the per-account token files.
+CLAUDE_ACCOUNTS = ['main', 'sub']
+CODEX_ACCOUNTS = ['main', 'sub']
+
 STRAVA_CONF = {
     'TOKEN_FILE': os.path.join(BASE_DIR, 'strava_token.json')
 }
 
 # --- FILES & SCOPES ---
 GMAIL_TOKEN_PATH = os.path.join(BASE_DIR, 'token.json')
+GMAIL_CREDENTIALS_PATH = os.path.join(BASE_DIR, 'credentials.json')
 ROBOROCK_TOKEN_FILE = os.path.join(BASE_DIR, 'roborock_session.pkl')
 ROBOROCK_STATS_FILE = os.path.join(BASE_DIR, 'roborock_stats.json')
 GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
@@ -95,28 +108,15 @@ GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 if os.path.exists(LIB_DIR):
     sys.path.append(LIB_DIR)
 
-# --- GPIO PIN FACTORY ---
-# Prefer the lgpio backend: the native/sysfs factory is broken on Raspberry Pi
-# OS Bookworm (kernel 6.x) and fails to export the pins. If lgpio is not
-# available (older OS images), fall back to gpiozero's default instead of
-# hard-crashing on import.
-#
-# On import, lgpio creates its ".lgd-nfy*" notification pipe in the current
-# working directory. Import from /tmp so it never depends on the permissions
-# or location of the project directory, then restore the working directory.
-_prev_cwd = os.getcwd()
-try:
-    os.chdir('/tmp')
-    from gpiozero import Device
-    from gpiozero.pins.lgpio import LGPIOFactory
-    Device.pin_factory = LGPIOFactory()
-except Exception as _e:
-    print(f"lgpio pin factory unavailable ({_e}); using gpiozero default")
-finally:
-    os.chdir(_prev_cwd)
+from waveshare_epd_g import epd10in85g
+from panel_frame import PANEL_HEIGHT, PANEL_WIDTH, WHITE, build_frame
+from dgx_spark import GpuUnavailable, NodeMetrics, query_node_metrics
+from usage_status import claude_usage_failed, codex_usage_failed
+import gmail_auth
+from usage_widgets import (draw_claude_accounts_widget, draw_codex_accounts_widget, draw_dgx_spark_widget,
+                           draw_usage_bar, draw_vllm_widget, time_until)
 
 try:
-    from waveshare_epd import epd10in85
     import bambulabs_api as bl
     from roborock.web_api import RoborockApiClient
     from roborock.devices.device_manager import create_device_manager, UserParams
@@ -142,21 +142,12 @@ logger.handlers.clear()
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
-# --- DRIVER DEBUG ---
-# Set True to log every stage of the e-paper driver (SPI load per controller,
-# refresh, and how long BUSY stays low) to pinpoint where a partial update
-# stalls. Only raises the driver's own logger; the rest of the app stays INFO.
-EPD_DEBUG = False
-if EPD_DEBUG:
-    logging.getLogger("waveshare_epd").setLevel(logging.DEBUG)
-
-# --- PANEL RE-INIT STRATEGY ---
-# The single-core Pi Zero 1 latches the panel BUSY line after the first partial
-# update, so it needs a hardware reset (init_Part) before every frame. Faster
-# multi-core boards (Zero 2 W, Pi 3/4/5) do not have this issue, so we skip the
-# extra re-init there to avoid needless latency and ghosting. Detected by core
-# count: Zero 1 = 1 core, everything newer = 4+.
-PANEL_REINIT_EACH_FRAME = (os.cpu_count() or 1) < 2
+# --- PANEL REFRESH ---
+# The (G) panel only supports full refreshes (~20s, whole screen flashes).
+REFRESH_INTERVAL_SECONDS = 300
+PANEL_REFRESH_TIMEOUT_SECONDS = 120
+# Upper bound for waiting on the first data round (4 usage scripts take ~25s on a Pi Zero).
+STARTUP_DATA_TIMEOUT_SECONDS = 180
 
 icon_cache = {}
 global_printer = None
@@ -222,6 +213,7 @@ net = NetworkManager()
 class DataStore:
     def __init__(self):
         self.lock = threading.Lock()
+        self.first_round_done = threading.Event()
         self.weather = {}
         self.aqi = 0
         self.strava = {
@@ -233,9 +225,10 @@ class DataStore:
         self.printer = {'status': 'OFFLINE'}
         self.gmail_unread = 0
         self.spotify = {'status': 'PAUSED', 'text': '', 'cover': None}
-        self.claude = {'error': False, 'five_hour': {}, 'seven_day': {}}
+        self.claude = {account: {'error': True} for account in CLAUDE_ACCOUNTS}
         self.antigravity = {'error': False, 'models': []}
-        self.codex = {'error': False, 'five_hour': {}, 'seven_day': {}}
+        self.codex = {account: {'error': True} for account in CODEX_ACCOUNTS}
+        self.dgx_spark = {label: NodeMetrics(gpu=GpuUnavailable.PENDING) for label in DGX_SPARK_HOSTS}
         self.roborock = {
             'status': 'OFFLINE', 'battery': 0, 'is_cleaning': False,
             'current_area': 0.0, 'ref_area': 0.0, 'pct': 0.0, 'last_date': '-'
@@ -247,7 +240,7 @@ class DataStore:
         self.last_update = {
             'weather': 0, 'strava': 0, 'printer': 0, 'gmail': 0,
             'spotify': 0, 'crypto': 0, 'sysload': 0, 'ping': 0,
-            'claude': 0, 'antigravity': 0, 'codex': 0
+            'claude': 0, 'antigravity': 0, 'codex': 0, 'dgx_spark': 0
         }
 
 
@@ -284,23 +277,21 @@ def get_cached_icon(name, size, is_white=False):
     return icon_cache.get(key)
 
 
-def time_until(iso_str):
-    if not iso_str: return "N/A"
+def read_json_file(path):
     try:
-        # Handling the explicit +00:00 timezone format
-        target = datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
-        now = datetime.now(timezone.utc)
-        diff = target - now
-        if diff.total_seconds() < 0: return "Resetting..."
-        hours, rem = divmod(diff.total_seconds(), 3600)
-        days, hours = divmod(hours, 24)
-        if days > 0:
-            return f"{int(days)}d {int(hours)}h"
-        else:
-            minutes = rem // 60
-            return f"{int(hours)}h {int(minutes)}m"
-    except Exception:
-        return "N/A"
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def fetch_account_usage(script_args, account, usage_path, failed):
+    try:
+        subprocess.run([sys.executable, *script_args, '--account', account], capture_output=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        logging.error(f"{script_args[0]} timed out for account {account}")
+    usage = read_json_file(usage_path)
+    return {**(usage or {}), 'error': failed(usage)}
 
 
 # --- AUTH & FETCH THREADS ---
@@ -308,29 +299,24 @@ def time_until(iso_str):
 def auth_claude():
     global ENABLE_CLAUDE
     if not ENABLE_CLAUDE: return
-    try:
-        import claude
-        success = claude.interactive_auth()
-        if not success:
-            ENABLE_CLAUDE = False
-            print("Claude widget is disabled.")
-    except ImportError:
-        print("claude.py not found. Claude widget disabled.")
+    import claude
+    authorized = [claude.interactive_auth(account) for account in CLAUDE_ACCOUNTS]
+    if not any(authorized):
         ENABLE_CLAUDE = False
+        print("No Claude account authorized. Claude widget is disabled.")
 
 
 def auth_codex():
     global ENABLE_CODEX
     if not ENABLE_CODEX: return
-    # codex.py has no interactive login; it just needs a valid auth.json that
-    # the user provides. Disable the widget if either file is missing.
-    if not os.path.exists(os.path.join(BASE_DIR, 'codex.py')):
-        print("codex.py not found. Codex widget disabled.")
+    # codex.py has no interactive login: each account needs a copied Codex CLI auth file.
+    import codex
+    missing = [account for account in CODEX_ACCOUNTS if not codex.account_files(account).auth.exists()]
+    for account in missing:
+        print(f"{codex.account_files(account).auth.name} not found. Codex account '{account}' will show an error.")
+    if len(missing) == len(CODEX_ACCOUNTS):
         ENABLE_CODEX = False
-        return
-    if not os.path.exists(os.path.join(BASE_DIR, 'auth.json')):
-        print("auth.json not found. Codex widget disabled.")
-        ENABLE_CODEX = False
+        print("No Codex auth file found. Codex widget disabled.")
 
 
 def auth_antigravity():
@@ -595,9 +581,15 @@ def update_data_thread():
     while True:
         now = time.time()
 
+        if ENABLE_DGX_SPARK and now - data_store.last_update['dgx_spark'] > 240:
+            for label, host in DGX_SPARK_HOSTS.items():
+                metrics = query_node_metrics(host)
+                with data_store.lock: data_store.dgx_spark[label] = metrics
+            data_store.last_update['dgx_spark'] = now
+
         if now - data_store.last_update['weather'] > 600:
-            weather_url = f"{API_ENDPOINTS['weather']}?latitude={LOCATION_LAT}&longitude={LOCATION_LON}&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,wind_direction_10m,weather_code,is_day,uv_index&hourly=temperature_2m,precipitation_probability,weather_code,cloud_cover&timezone=auto&forecast_days=2"
-            aqi_url = f"{API_ENDPOINTS['aqi']}?latitude={LOCATION_LAT}&longitude={LOCATION_LON}&current=european_aqi&timezone=auto"
+            weather_url = f"{API_ENDPOINTS['weather']}?latitude={LOCATION.latitude}&longitude={LOCATION.longitude}&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,wind_direction_10m,weather_code,is_day,uv_index&hourly=temperature_2m,precipitation_probability,weather_code,cloud_cover&timezone=auto&forecast_days=2"
+            aqi_url = f"{API_ENDPOINTS['aqi']}?latitude={LOCATION.latitude}&longitude={LOCATION.longitude}&current=european_aqi&timezone=auto"
             w_data = net.get_json(weather_url)
             a_data = net.get_json(aqi_url)
             with data_store.lock:
@@ -611,7 +603,7 @@ def update_data_thread():
                 if s_data:
                     with data_store.lock: data_store.strava = s_data
                 data_store.last_update['strava'] = now
-        else:
+        elif not ENABLE_DGX_SPARK:
             if now - data_store.last_update['sysload'] > 30:
                 try:
                     with open('/proc/loadavg', 'r') as f:
@@ -665,7 +657,7 @@ def update_data_thread():
                     with data_store.lock:
                         data_store.printer['status'] = 'OFFLINE'
                 data_store.last_update['printer'] = now
-        else:
+        elif not ENABLE_CLAUDE:
             if now - data_store.last_update['crypto'] > 600:
                 btc_url = f"{API_ENDPOINTS['btc']}?vs_currency=usd&days=7"
                 eth_url = f"{API_ENDPOINTS['eth']}?vs_currency=usd&days=7"
@@ -684,7 +676,7 @@ def update_data_thread():
                             data_store.crypto['eth_hist'] = prices[::len(prices) // 50][:50]
                 data_store.last_update['crypto'] = now
 
-        if not ENABLE_ROBOROCK and not ENABLE_ANTIGRAVITY:
+        if not ENABLE_ROBOROCK and not ENABLE_ANTIGRAVITY and not ENABLE_CODEX:
             if now - data_store.last_update['ping'] > 20:
                 try:
                     out = subprocess.check_output(['ping', '-c', '1', '-W', '1', '8.8.8.8']).decode('utf-8')
@@ -708,59 +700,24 @@ def update_data_thread():
                     service = build('gmail', 'v1', credentials=creds, cache_discovery=False)
                     label_info = service.users().labels().get(userId='me', id='INBOX').execute()
                     with data_store.lock: data_store.gmail_unread = label_info.get('messagesUnread', 0)
-            except:
-                pass
+            except Exception as e:
+                logging.error(f"Gmail update error: {e}")
             data_store.last_update['gmail'] = now
 
-        # Claude Data Fetching (Run external script every 10 min)
         if ENABLE_CLAUDE and now - data_store.last_update['claude'] > 600:
-            try:
-                subprocess.run([sys.executable, os.path.join(BASE_DIR, 'claude.py')], capture_output=True, timeout=30)
-                usage_path = os.path.join(BASE_DIR, 'usage.json')
-                if os.path.exists(usage_path):
-                    with open(usage_path, 'r') as f:
-                        usage_data = json.load(f)
-                    with data_store.lock:
-                        data_store.claude = usage_data
-                        if "error" in usage_data and "five_hour" not in usage_data:
-                            data_store.claude['error'] = True
-                        else:
-                            data_store.claude['error'] = False
-                else:
-                    with data_store.lock:
-                        data_store.claude['error'] = True
-            except Exception as e:
-                logging.error(f"Claude update error: {e}")
-                with data_store.lock:
-                    data_store.claude['error'] = True
+            import claude
+            for account in CLAUDE_ACCOUNTS:
+                usage = fetch_account_usage([os.path.join(BASE_DIR, 'claude.py')], account,
+                                            claude.account_files(account).usage, claude_usage_failed)
+                with data_store.lock: data_store.claude[account] = usage
             data_store.last_update['claude'] = now
 
-        # Codex Data Fetching (Run external script every 10 min)
         if ENABLE_CODEX and now - data_store.last_update['codex'] > 600:
-            try:
-                subprocess.run([sys.executable, os.path.join(BASE_DIR, 'codex.py'), '--once'],
-                               capture_output=True, timeout=30)
-                usage_path = os.path.join(BASE_DIR, 'codex_usage.json')
-                if os.path.exists(usage_path):
-                    with open(usage_path, 'r') as f:
-                        usage_data = json.load(f)
-                    with data_store.lock:
-                        data_store.codex = usage_data
-                        # codex.py signals failure with utilization = -1.0 (not an
-                        # "error" key like claude.py), so check both.
-                        sd = usage_data.get('seven_day', {})
-                        if usage_data.get('error') or 'seven_day' not in usage_data \
-                                or sd.get('utilization', -1) < 0:
-                            data_store.codex['error'] = True
-                        else:
-                            data_store.codex['error'] = False
-                else:
-                    with data_store.lock:
-                        data_store.codex['error'] = True
-            except Exception as e:
-                logging.error(f"Codex update error: {e}")
-                with data_store.lock:
-                    data_store.codex['error'] = True
+            import codex
+            for account in CODEX_ACCOUNTS:
+                usage = fetch_account_usage([os.path.join(BASE_DIR, 'codex.py'), '--once'], account,
+                                            codex.account_files(account).usage, codex_usage_failed)
+                with data_store.lock: data_store.codex[account] = usage
             data_store.last_update['codex'] = now
 
         if ENABLE_ANTIGRAVITY and now - data_store.last_update['antigravity'] > 60:
@@ -819,6 +776,7 @@ def update_data_thread():
                     pass
             data_store.last_update['spotify'] = now
 
+        data_store.first_round_done.set()
         gc.collect()
         time.sleep(1)
 
@@ -827,9 +785,9 @@ def update_data_thread():
 def draw_icon(draw, x, y, name, size=(40, 40), is_white=False):
     icon = get_cached_icon(name, size, is_white)
     if icon:
-        draw.bitmap((x, y), icon, fill=255 if is_white else 0)
+        draw.bitmap((x, y), icon, fill=WHITE if is_white else 0)
     else:
-        draw.rectangle((x, y, x + size[0], y + size[1]), outline=255 if is_white else 0)
+        draw.rectangle((x, y, x + size[0], y + size[1]), outline=WHITE if is_white else 0)
 
 
 def draw_sparkline(draw, x, y, data, max_items=50, width=400, height=60, color=0, style="bar"):
@@ -871,9 +829,15 @@ def get_weather_icon(code, is_day=1):
     return "icon_sun"
 
 
-def render_screen(epd, fonts):
-    Himage = Image.new('1', (epd.width, epd.height), 255)
+def vllm_node(nodes):
+    serving = [node for node in nodes.values() if node.vllm is not None]
+    return serving[0] if serving else NodeMetrics(gpu=GpuUnavailable.OFFLINE)
+
+
+def render_screen(fonts):
+    Himage = Image.new('RGB', (PANEL_WIDTH, PANEL_HEIGHT), WHITE)
     draw = ImageDraw.Draw(Himage)
+    draw.fontmode = "1"  # anti-aliased grey edges would quantize into yellow/red fringes
 
     if not data_store.lock.acquire(timeout=2.0): return Himage
     try:
@@ -887,20 +851,23 @@ def render_screen(epd, fonts):
         claude = data_store.claude.copy()
         antigravity = data_store.antigravity.copy()
         codex = data_store.codex.copy()
+        dgx_spark = data_store.dgx_spark.copy()
         sysload = data_store.sysload.copy()
         crypto = data_store.crypto.copy()
         ping = data_store.ping.copy()
     finally:
         data_store.lock.release()
 
-    col_w = epd.width // 3
+    col_w = PANEL_WIDTH // 3
 
     # --- COLUMN 1 (Widgets) ---
     col1_x = 20
 
-    # Widget 1: Strava or SysLoad
+    # Widget 1: DGX Spark, Strava or SysLoad
     y1 = 20
-    if ENABLE_STRAVA:
+    if ENABLE_DGX_SPARK:
+        draw_dgx_spark_widget(draw, fonts, col1_x, y1, {label: node.gpu for label, node in dgx_spark.items()})
+    elif ENABLE_STRAVA:
         draw_icon(draw, col1_x, y1, "icon_strava", (60, 60))
         draw.text((col1_x + 70, y1), "STRAVA STATS", font=fonts['28'], fill=0)
 
@@ -927,9 +894,11 @@ def render_screen(epd, fonts):
 
     draw.line((col1_x, 150, col_w - 20, 150), fill=0, width=2)
 
-    # Widget 2: Bambu or Crypto
+    # Widget 2: Claude, Bambu or Crypto
     y2 = 170
-    if ENABLE_BAMBU:
+    if ENABLE_CLAUDE:
+        draw_claude_accounts_widget(draw, fonts, col1_x, y2, claude)
+    elif ENABLE_BAMBU:
         p_status = str(printer.get('status', 'OFFLINE')).upper()
         draw_icon(draw, col1_x, y2, "icon_3d", (60, 60))
         draw.text((col1_x + 70, y2), f"PRINTER: {p_status}", font=fonts['28'], fill=0)
@@ -984,32 +953,11 @@ def render_screen(epd, fonts):
                     rem_time = time_until(m_data.get('resetDate'))
                     
                     draw.text((col1_x + 60, y_off), f"{label} {pct}% | In {rem_time}", font=fonts['20'], fill=0)
-                    
-                    bx, bw, bh = col1_x + 60, 330, 15
-                    draw.rectangle((bx, y_off + 25, bx + bw, y_off + 25 + bh), outline=0, width=2)
-                    fill_w = int((bw - 4) * min(pct / 100.0, 1.0))
-                    if fill_w > 0: draw.rectangle((bx + 2, y_off + 27, bx + 2 + fill_w, y_off + 25 + bh - 2), fill=0)
-                    
+                    draw_usage_bar(draw, col1_x + 60, y_off + 25, 330, pct, height=15)
+
                     y_off += 50
     elif ENABLE_CODEX:
-        draw_icon(draw, col1_x, y3, "icon_cpu", (50, 50))
-        draw.text((col1_x + 60, y3), "CODEX AI USAGE", font=fonts['28'], fill=0)
-
-        if codex.get('error'):
-            draw.text((col1_x + 60, y3 + 40), "Codex Usage Error", font=fonts['20'], fill=0)
-        else:
-            # 7-Day limit only: OpenAI has disabled the 5-hour window for now.
-            pct_7d = codex.get('seven_day', {}).get('utilization', 0)
-            resets_7d = codex.get('seven_day', {}).get('resets_at')
-            rem_7d = time_until(resets_7d)
-
-            draw.text((col1_x + 60, y3 + 40), f"7-Day Limit: {round(pct_7d)}% (In {rem_7d})",
-                      font=fonts['20'], fill=0)
-            bx, bw, bh = col1_x + 60, 330, 15
-            draw.rectangle((bx, y3 + 70, bx + bw, y3 + 70 + bh), outline=0, width=2)
-            fill_w = int((bw - 4) * min(pct_7d / 100.0, 1.0))
-            if fill_w > 0:
-                draw.rectangle((bx + 2, y3 + 72, bx + 2 + fill_w, y3 + 70 + bh - 2), fill=0)
+        draw_codex_accounts_widget(draw, fonts, col1_x, y3, codex)
     else:
         draw_icon(draw, col1_x, y3, "icon_wifi", (50, 50))
         draw.text((col1_x + 60, y3), f"Internet Quality: {ping['current']} ms", font=fonts['28'], fill=0)
@@ -1050,7 +998,7 @@ def render_screen(epd, fonts):
         if uv_rounded >= 6:
             pad = 5
             draw.rectangle((uv_val_x - pad, uv_val_y - pad + 10, uv_val_x + tw + pad, uv_val_y + th + pad), fill=0)
-            draw.text((uv_val_x, uv_val_y), uv_val_str, font=fonts['60'], fill=255)
+            draw.text((uv_val_x, uv_val_y), uv_val_str, font=fonts['60'], fill=WHITE)
         else:
             draw.text((uv_val_x, uv_val_y), uv_val_str, font=fonts['60'], fill=0)
 
@@ -1113,7 +1061,7 @@ def render_screen(epd, fonts):
         if aqi >= 50:
             pad = 20
             draw.rectangle((val_x - pad, val_y - pad + 15, val_x + tw + pad, val_y + th + pad - 5), fill=0)
-            draw.text((val_x, val_y), aqi_str, font=fonts['80'], fill=255)
+            draw.text((val_x, val_y), aqi_str, font=fonts['80'], fill=WHITE)
         else:
             draw.text((val_x, val_y), aqi_str, font=fonts['80'], fill=0)
 
@@ -1154,41 +1102,14 @@ def render_screen(epd, fonts):
     draw.text((col3_x, 170), date_str, font=fonts['32'], fill=0)
     draw.text((col3_x + 340, 170), day_str, font=fonts['32'], fill=0)
 
-    draw.line((col3_x, 220, epd.width - 20, 220), fill=0, width=2)
+    draw.line((col3_x, 220, PANEL_WIDTH - 20, 220), fill=0, width=2)
 
-    # 2. Claude AI OR Spotify OR Time Progress
+    # 2. Spotify OR Time Progress
     sp_y = 240
     # Clear background for widget
-    draw.rectangle((col3_x, sp_y, col3_x + 420, sp_y + 130), fill=255)
+    draw.rectangle((col3_x, sp_y, col3_x + 420, sp_y + 130), fill=WHITE)
 
-    if ENABLE_CLAUDE:
-        draw.text((col3_x, sp_y), "CLAUDE AI USAGE", font=fonts['28'], fill=0)
-
-        if claude.get('error'):
-            draw.text((col3_x, sp_y + 50), "Claude Usage Error", font=fonts['24'], fill=0)
-        else:
-            # 5-Hour Limit
-            pct_5h = claude.get('five_hour', {}).get('utilization', 0)
-            resets_5h = claude.get('five_hour', {}).get('resets_at')
-            rem_5h = time_until(resets_5h)
-
-            draw.text((col3_x, sp_y + 40), f"5-Hour Limit: {pct_5h}% (Resets in {rem_5h})", font=fonts['20'], fill=0)
-            bx, bw, bh = col3_x, 400, 15
-            draw.rectangle((bx, sp_y + 65, bx + bw, sp_y + 65 + bh), outline=0, width=2)
-            fill_w = int((bw - 4) * min(pct_5h / 100.0, 1.0))
-            if fill_w > 0: draw.rectangle((bx + 2, sp_y + 67, bx + 2 + fill_w, sp_y + 65 + bh - 2), fill=0)
-
-            # 7-Day Limit
-            pct_7d = claude.get('seven_day', {}).get('utilization', 0)
-            resets_7d = claude.get('seven_day', {}).get('resets_at')
-            rem_7d = time_until(resets_7d)
-
-            draw.text((col3_x, sp_y + 90), f"7-Day Limit: {pct_7d}% (Resets in {rem_7d})", font=fonts['20'], fill=0)
-            draw.rectangle((bx, sp_y + 115, bx + bw, sp_y + 115 + bh), outline=0, width=2)
-            fill_w = int((bw - 4) * min(pct_7d / 100.0, 1.0))
-            if fill_w > 0: draw.rectangle((bx + 2, sp_y + 117, bx + 2 + fill_w, sp_y + 115 + bh - 2), fill=0)
-
-    elif ENABLE_SPOTIFY:
+    if ENABLE_SPOTIFY:
         if spotify['cover']:
             Himage.paste(spotify['cover'], (col3_x, sp_y))
         else:
@@ -1203,6 +1124,9 @@ def render_screen(epd, fonts):
             track = words[1] if len(words) > 1 else ""
             draw.text((col3_x + 180, sp_y + 10), artist[:20], font=fonts['28'], fill=0)
             draw.text((col3_x + 140, sp_y + 50), track[:25], font=fonts['24'], fill=0)
+
+    elif ENABLE_DGX_SPARK:
+        draw_vllm_widget(draw, fonts, col3_x, sp_y, vllm_node(dgx_spark))
 
     else:
         # Fallback: Time Progress
@@ -1231,7 +1155,7 @@ def render_screen(epd, fonts):
         draw_prog(75, "MONTH", month_pct)
         draw_prog(110, "YEAR", year_pct)
 
-    draw.line((col3_x, 380, epd.width - 20, 380), fill=0, width=2)
+    draw.line((col3_x, 380, PANEL_WIDTH - 20, 380), fill=0, width=2)
 
     # 3. Gmail
     gm_y = 400
@@ -1242,23 +1166,25 @@ def render_screen(epd, fonts):
 
 
 # --- MAIN LOOP ---
+def show_frame(epd, frame):
+    logging.info("Full refresh")
+    signal.alarm(PANEL_REFRESH_TIMEOUT_SECONDS)
+    epd.show(frame)
+    signal.alarm(0)
+
+
 def main():
     auth_strava()
     auth_claude()
     auth_antigravity()
     auth_codex()
+    gmail_auth.interactive_auth(GMAIL_CREDENTIALS_PATH, GMAIL_TOKEN_PATH, GMAIL_SCOPES)
     roborock_user_data = auth_roborock(ROBOROCK_CONF['EMAIL'])
 
     signal.signal(signal.SIGALRM, timeout_handler)
-    epd = None
+    epd = epd10in85g.EPD()
 
     try:
-        epd = epd10in85.EPD()
-        epd.init()
-        epd.Clear()
-        time.sleep(1)
-        epd.init_Part()
-
         def load_font(name, size):
             return ImageFont.truetype(os.path.join(FONT_DIR, name), size)
 
@@ -1283,7 +1209,7 @@ def main():
             t_robo.daemon = True
             t_robo.start()
 
-        refresh_counter = 0
+        data_store.first_round_done.wait(timeout=STARTUP_DATA_TIMEOUT_SECONDS)
 
         while True:
             start_time = time.time()
@@ -1291,35 +1217,10 @@ def main():
                 # CPU-bound rendering runs OUTSIDE the hardware watchdog: on a
                 # Pi Zero 1 it can be slow, but it never hangs, so a slow render
                 # must not trigger a reboot and throw away the frame.
-                image = render_screen(epd, fonts)
-                buf = epd.getbuffer(image)
-
-                if refresh_counter >= 600:
-                    logging.info("Full Refresh cycle")
-                    signal.alarm(90)  # full refresh flashes the whole panel, it is slow
-                    epd.init()
-                    epd.display(buf)
-                    time.sleep(2)
-                    epd.init_Part()
-                    signal.alarm(0)
-                    refresh_counter = 0
-                else:
-                    logging.debug("Partial Refresh")
-                    signal.alarm(30)  # watchdog guards only the SPI/BUSY transfer
-                    # On the Pi Zero 1 the panel reliably completes only the
-                    # FIRST partial after an init: afterwards the controller
-                    # latches BUSY low forever. init_Part() does a hardware reset
-                    # (RST pin) that pulls it out of that state, so re-arm before
-                    # every frame. Skipped on faster boards (see the flag above).
-                    if PANEL_REINIT_EACH_FRAME:
-                        epd.init_Part()
-                    epd.display_Partial(buf, 0, 0, epd.width, epd.height)
-                    signal.alarm(0)
-                    refresh_counter += 1
-
-                del image
-                del buf
-                if refresh_counter % 10 == 0: gc.collect()
+                frame = build_frame(render_screen(fonts))
+                show_frame(epd, frame)
+                del frame
+                gc.collect()
 
             except HardwareTimeoutError:
                 logging.critical("HARDWARE HANG DETECTED!")
@@ -1328,22 +1229,19 @@ def main():
                 os.execv(sys.executable, ['python'] + sys.argv)
             except OSError as e:
                 signal.alarm(0)
-                if e.errno == 24:
+                if e.errno == errno.EMFILE:
                     os.execv(sys.executable, ['python'] + sys.argv)
+                logging.error(f"OS error in main: {e}")
             except Exception as e:
                 signal.alarm(0)
                 logging.error(f"Unexpected error in main: {e}")
 
             elapsed = time.time() - start_time
-            sleep_time = max(5, 60 - elapsed)
+            sleep_time = max(5, REFRESH_INTERVAL_SECONDS - elapsed)
             time.sleep(sleep_time)
 
     except KeyboardInterrupt:
-        try:
-            signal.alarm(0)
-            epd10in85.epdconfig.module_exit(cleanup=True)
-        except:
-            pass
+        signal.alarm(0)
         exit()
 
 

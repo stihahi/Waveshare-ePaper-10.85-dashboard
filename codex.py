@@ -6,14 +6,14 @@ Direct ChatGPT/Codex subscription limits monitor
 Single-purpose script for a VPS / e-ink dashboard.
 
 Behavior:
-  - Always runs with no command-line parameters.
-  - Requires ./auth.json next to this script.
+  - Usage: codex.py --account <name> [--once]
+  - Requires ./codex_auth_<name>.json (a copy of ~/.codex/auth.json) next to this script.
   - Does NOT start browser login.
   - Does NOT require or start Codex CLI.
-  - Uses the access_token from auth.json to call the undocumented usage endpoint.
+  - Uses the access_token from the auth file to call the undocumented usage endpoint.
   - Refreshes/rotates tokens with refresh_token when the access token is near expiry
     or when the usage endpoint returns 401/403.
-  - Writes ./usage.json every 60 seconds in the Claude-compatible shape:
+  - Writes ./codex_usage_<name>.json every 60 seconds in the Claude-compatible shape:
       {
         "updated_at": "...",
         "five_hour": {"utilization": 0.0, "resets_at": "..."},
@@ -25,7 +25,7 @@ Requirements:
   pip install requests
 
 Important:
-  auth.json is a secret. It contains access and refresh tokens.
+  The auth file is a secret. It contains access and refresh tokens.
 """
 
 from __future__ import annotations
@@ -36,18 +36,17 @@ import datetime as dt
 import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 import requests
 
+from accounts import account_file, account_from_argv
+
 
 # ── Configuration ──────────────────────────────────────────────────────────
 SCRIPT_DIR = Path(__file__).parent.resolve()
-AUTH_FILE = SCRIPT_DIR / "auth.json"
-# Separate output file: claude.py already owns usage.json, so writing there too
-# would make the two monitors overwrite each other's data.
-USAGE_FILE = SCRIPT_DIR / "codex_usage.json"
 LOG_FILE = SCRIPT_DIR / "monitor.log"
 
 POLL_INTERVAL_SEC = 60
@@ -64,6 +63,19 @@ USER_AGENT = "limits-new5/1.0"
 
 class FatalError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class CodexAccountFiles:
+    auth: Path
+    usage: Path
+
+
+def account_files(account: str) -> CodexAccountFiles:
+    return CodexAccountFiles(
+        auth=account_file("codex_auth", account),
+        usage=account_file("codex_usage", account),
+    )
 
 
 # ── Logging / file helpers ─────────────────────────────────────────────────
@@ -96,32 +108,32 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def write_usage_error(reason: str) -> None:
+def write_usage_error(reason: str, files: CodexAccountFiles) -> None:
     payload = {
         "updated_at": iso_now(),
         "five_hour": {"utilization": -1.0, "resets_at": None},
         "seven_day": {"utilization": -1.0, "resets_at": None},
     }
-    write_json(USAGE_FILE, payload)
+    write_json(files.usage, payload)
     append_log(f"ERROR: {reason}")
     log_error(f"Could not update limits: {reason}")
 
 
-# ── auth.json helpers ──────────────────────────────────────────────────────
-def load_auth() -> dict[str, Any]:
-    if not AUTH_FILE.exists():
-        raise FatalError(f"auth.json was not found next to the script: {AUTH_FILE}")
+# ── auth file helpers ─────────────────────────────────────────────────────
+def load_auth(files: CodexAccountFiles) -> dict[str, Any]:
+    if not files.auth.exists():
+        raise FatalError(f"auth file was not found next to the script: {files.auth}")
     try:
-        data = json.loads(AUTH_FILE.read_text(encoding="utf-8"))
+        data = json.loads(files.auth.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise FatalError(f"auth.json is not valid JSON: {exc}") from exc
+        raise FatalError(f"{files.auth.name} is not valid JSON: {exc}") from exc
     if not isinstance(data, dict):
-        raise FatalError("auth.json root must be a JSON object")
+        raise FatalError(f"{files.auth.name} root must be a JSON object")
     return data
 
 
-def save_auth(data: dict[str, Any]) -> None:
-    write_json(AUTH_FILE, data)
+def save_auth(data: dict[str, Any], files: CodexAccountFiles) -> None:
+    write_json(files.auth, data)
 
 
 def get_tokens(auth: dict[str, Any]) -> dict[str, Any]:
@@ -206,7 +218,7 @@ def token_needs_refresh(auth: dict[str, Any]) -> bool:
 def require_token(auth: dict[str, Any], *names: str) -> str:
     value = get_token_value(auth, *names)
     if not value:
-        raise FatalError(f"auth.json is missing required token field: {'/'.join(names)}")
+        raise FatalError(f"auth file is missing required token field: {'/'.join(names)}")
     return value
 
 
@@ -230,7 +242,7 @@ def get_account_id(auth: dict[str, Any]) -> Optional[str]:
 
 
 # ── OAuth refresh ──────────────────────────────────────────────────────────
-def refresh_tokens(auth: dict[str, Any]) -> dict[str, Any]:
+def refresh_tokens(auth: dict[str, Any], files: CodexAccountFiles) -> dict[str, Any]:
     refresh_token = require_token(auth, "refresh_token", "refreshToken")
 
     headers = {
@@ -277,8 +289,8 @@ def refresh_tokens(auth: dict[str, Any]) -> dict[str, Any]:
         set_token_value(auth, "expires_at", int(time.time() + float(payload["expires_in"])))
 
     auth["last_refresh"] = iso_now()
-    save_auth(auth)
-    log("Access token refreshed and auth.json updated.")
+    save_auth(auth, files)
+    log(f"Access token refreshed and {files.auth.name} updated.")
     return auth
 
 
@@ -634,17 +646,17 @@ def choose_duration_window(windows: list[dict[str, Any]], target: float, toleran
 
 
 # ── Main monitor loop ──────────────────────────────────────────────────────
-def update_once() -> dict[str, Any]:
-    auth = load_auth()
+def update_once(files: CodexAccountFiles) -> dict[str, Any]:
+    auth = load_auth(files)
 
     if token_needs_refresh(auth):
-        auth = refresh_tokens(auth)
+        auth = refresh_tokens(auth, files)
 
     try:
         raw = fetch_usage(auth)
     except PermissionError as exc:
         append_log(f"Usage request failed with auth error; refreshing once and retrying. {exc}")
-        auth = refresh_tokens(auth)
+        auth = refresh_tokens(auth, files)
         raw = fetch_usage(auth)
 
     five_hour, seven_day = extract_limits(raw)
@@ -653,7 +665,7 @@ def update_once() -> dict[str, Any]:
         "five_hour": five_hour,
         "seven_day": seven_day,
     }
-    write_json(USAGE_FILE, payload)
+    write_json(files.usage, payload)
     return payload
 
 
@@ -662,17 +674,18 @@ def main() -> int:
     # periodically (like it does claude.py), so it must not run as a daemon
     # there. Without --once the script keeps updating every 60s as before.
     run_once = "--once" in sys.argv
+    files = account_files(account_from_argv(sys.argv))
 
     if not run_once:
         log("Starting direct ChatGPT/Codex limits monitor. Updates every 60 seconds.")
-    if not AUTH_FILE.exists():
-        write_usage_error(f"auth.json was not found next to the script: {AUTH_FILE}")
+    if not files.auth.exists():
+        write_usage_error(f"auth file was not found next to the script: {files.auth}", files)
         return 1
 
     while True:
         started = time.time()
         try:
-            payload = update_once()
+            payload = update_once(files)
             five = payload["five_hour"]
             seven = payload["seven_day"]
             log(
@@ -684,7 +697,7 @@ def main() -> int:
             log("Monitor stopped.")
             return 130
         except Exception as exc:
-            write_usage_error(str(exc))
+            write_usage_error(str(exc), files)
 
         if run_once:
             return 0
