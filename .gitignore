@@ -1,6 +1,6 @@
 # Secrets: OAuth tokens and client credentials
 credentials.json
-token.json
+token.json*
 claude_creds*.json
 codex_auth*.json
 auth.json

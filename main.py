@@ -28,8 +28,6 @@ from local_config import LocalConfig, Location, load_local_config
 
 # --- GMAIL IMPORTS ---
 from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
 
 # --- SYSTEM LIMITS ---
 try:
@@ -690,13 +688,8 @@ def update_data_thread():
 
         if now - data_store.last_update['gmail'] > 300:
             try:
-                creds = None
-                if os.path.exists(GMAIL_TOKEN_PATH):
-                    creds = Credentials.from_authorized_user_file(GMAIL_TOKEN_PATH, GMAIL_SCOPES)
-                    if creds and creds.expired and creds.refresh_token:
-                        creds.refresh(Request())
-                        with open(GMAIL_TOKEN_PATH, 'w') as t: t.write(creds.to_json())
-                if creds and creds.valid:
+                creds = gmail_auth.load_usable_credentials(GMAIL_TOKEN_PATH, GMAIL_SCOPES)
+                if creds:
                     service = build('gmail', 'v1', credentials=creds, cache_discovery=False)
                     label_info = service.users().labels().get(userId='me', id='INBOX').execute()
                     with data_store.lock: data_store.gmail_unread = label_info.get('messagesUnread', 0)

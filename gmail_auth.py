@@ -1,7 +1,12 @@
-# One-time Gmail login for a headless Pi: print the consent URL, let the user
-# paste back the (unreachable) localhost redirect URL, and save token.json.
+# Gmail login for a headless Pi: reuse the stored token while it still works,
+# otherwise print the consent URL, let the user paste back the (unreachable)
+# localhost redirect URL, and save token.json.
 import os
 from urllib.parse import parse_qs, urlparse
+
+from google.auth.exceptions import RefreshError
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 
 LOOPBACK_REDIRECT_URI = "http://localhost"
 
@@ -13,8 +18,29 @@ def authorization_code_from_callback(callback_url):
     return codes[0]
 
 
+def load_usable_credentials(token_path, scopes):
+    if not os.path.exists(token_path):
+        return None
+    credentials = Credentials.from_authorized_user_file(str(token_path), scopes)
+    if credentials.valid:
+        return credentials
+    return _refreshed(credentials, token_path)
+
+
+def _refreshed(credentials, token_path):
+    if not credentials.refresh_token:
+        return None
+    try:
+        credentials.refresh(Request())
+    except RefreshError as error:
+        print(f"Stored Gmail token is no longer usable: {error}")
+        return None
+    _store_token(token_path, credentials)
+    return credentials
+
+
 def interactive_auth(credentials_path, token_path, scopes):
-    if os.path.exists(token_path):
+    if load_usable_credentials(token_path, scopes):
         return True
     if not os.path.exists(credentials_path):
         print(f"{os.path.basename(credentials_path)} not found. Gmail widget shows 0.")
@@ -50,8 +76,12 @@ def _save_token(flow, callback_url, token_path):
     except Exception as error:
         print(f"Gmail authorization failed: {error}")
         return False
-    with open(token_path, "w") as token_file:
-        token_file.write(flow.credentials.to_json())
-    os.chmod(token_path, 0o600)
+    _store_token(token_path, flow.credentials)
     print("Gmail Authorization Successful!\n")
     return True
+
+
+def _store_token(token_path, credentials):
+    with open(token_path, "w") as token_file:
+        token_file.write(credentials.to_json())
+    os.chmod(token_path, 0o600)
