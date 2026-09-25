@@ -14,6 +14,11 @@ model=$(curl -s --max-time 3 http://localhost:8000/v1/models 2>/dev/null |
     grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 [ -n "$model" ] && echo "model=$model"
 
-stats=$(docker logs --since 5m "$container" 2>&1 | grep 'Avg prompt throughput' | tail -1)
-[ -n "$stats" ] && echo "vllm=$stats"
+# The dashboard averages this window: a single snapshot can land on a prefill
+# step, where decoding momentarily drops to a few tokens per second.
+SAMPLE_COUNT=5
+docker logs --since 5m "$container" 2>&1 |
+    grep 'Avg prompt throughput' |
+    tail -"$SAMPLE_COUNT" |
+    sed 's/^/vllm=/'
 exit 0
