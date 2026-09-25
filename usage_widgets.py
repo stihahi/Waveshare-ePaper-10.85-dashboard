@@ -64,14 +64,20 @@ def draw_vllm_widget(draw, fonts, x, y, node):
         draw.text((x, y + 40), "engine offline", font=fonts['20'], fill=BLACK)
         return
     _draw_engine_load(draw, fonts, x, y + 36, node.vllm)
-    draw.text((x, y + 64), f"KV cache {round(node.vllm.kv_cache_pct)}%", font=fonts['20'], fill=BLACK)
-    draw_usage_bar(draw, x, y + 92, 400, node.vllm.kv_cache_pct)
+    _draw_prefill_load(draw, fonts, x, y + 62, node.vllm)
+    draw.text((x, y + 88), f"KV cache {round(node.vllm.kv_cache_pct)}%", font=fonts['20'], fill=BLACK)
+    draw_usage_bar(draw, x, y + 112, 400, node.vllm.kv_cache_pct)
 
 
-def _draw_engine_load(draw, fonts, x, y, stats):
-    draw.text((x, y), f"{stats.generation_throughput:.1f} tok/s   run {stats.running}", font=fonts['20'], fill=BLACK)
-    queued_color = RED if stats.waiting > 0 else BLACK
-    draw.text((x + 300, y), f"wait {stats.waiting}", font=fonts['20'], fill=queued_color)
+def _draw_engine_load(draw, fonts, x, y, activity):
+    decoding = f"gen {activity.mean_generation_throughput:.1f} tok/s   run {activity.running}"
+    draw.text((x, y), decoding, font=fonts['20'], fill=BLACK)
+    queued_color = RED if activity.waiting > 0 else BLACK
+    draw.text((x + 300, y), f"wait {activity.waiting}", font=fonts['20'], fill=queued_color)
+
+
+def _draw_prefill_load(draw, fonts, x, y, activity):
+    draw.text((x, y), f"prefill {activity.mean_prompt_throughput:.0f} tok/s", font=fonts['20'], fill=BLACK)
 
 
 def _short_model_name(model):

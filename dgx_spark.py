@@ -3,10 +3,11 @@ import subprocess
 from dataclasses import dataclass
 from enum import Enum
 
-from vllm_stats import VllmStats, parse_engine_log_line
+from vllm_stats import VllmActivity, parse_engine_log_line, summarize_samples
 
 # The SSH key on each node is locked to a forced command, so the request itself carries no arguments.
 METRICS_REQUEST = "epaper-metrics"
+VLLM_SAMPLE_PREFIX = "vllm="
 SSH_CONNECT_TIMEOUT_SECONDS = 5
 SSH_COMMAND_TIMEOUT_SECONDS = 20
 
@@ -26,7 +27,7 @@ class GpuUnavailable(Enum):
 class NodeMetrics:
     gpu: object
     model: str = None
-    vllm: VllmStats = None
+    vllm: VllmActivity = None
 
 
 def parse_gpu_status(nvidia_smi_output):
@@ -38,8 +39,9 @@ def parse_gpu_status(nvidia_smi_output):
 
 
 def parse_node_metrics(metrics_output):
-    fields = _parse_fields(metrics_output)
-    return NodeMetrics(gpu=_gpu_from_fields(fields), model=fields.get("model"), vllm=_vllm_from_fields(fields))
+    lines = metrics_output.strip().splitlines()
+    fields = _parse_fields(line for line in lines if not line.startswith(VLLM_SAMPLE_PREFIX))
+    return NodeMetrics(gpu=_gpu_from_fields(fields), model=fields.get("model"), vllm=_vllm_from_lines(lines))
 
 
 def query_node_metrics(host):
@@ -50,9 +52,9 @@ def query_node_metrics(host):
         return NodeMetrics(gpu=GpuUnavailable.OFFLINE)
 
 
-def _parse_fields(metrics_output):
+def _parse_fields(lines):
     fields = {}
-    for line in metrics_output.strip().splitlines():
+    for line in lines:
         key, separator, value = line.partition("=")
         if separator:
             fields[key.strip()] = value.strip()
@@ -66,10 +68,10 @@ def _gpu_from_fields(fields):
         raise ValueError(f"node metrics are missing {error}") from error
 
 
-def _vllm_from_fields(fields):
-    if "vllm" not in fields:
-        return None
-    return parse_engine_log_line(fields["vllm"])
+def _vllm_from_lines(lines):
+    samples = [parse_engine_log_line(line[len(VLLM_SAMPLE_PREFIX):])
+               for line in lines if line.startswith(VLLM_SAMPLE_PREFIX)]
+    return summarize_samples(samples) if samples else None
 
 
 def _run_over_ssh(host, command):

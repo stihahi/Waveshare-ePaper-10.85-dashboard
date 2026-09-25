@@ -26,12 +26,15 @@ class ParseGpuStatusTest(unittest.TestCase):
 
 
 GPU_ONLY_OUTPUT = "temperature_c=54\nutilization_pct=0\n"
-FULL_OUTPUT = GPU_ONLY_OUTPUT + (
-    "model=nvidia/GLM-5.3-Flash-NVFP4\n"
-    "vllm=(APIServer pid=1222) INFO 09-17 18:27:24 [loggers.py:310] Engine 000: "
-    "Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 14.6 tokens/s, "
-    "Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 7.0%, Prefix cache hit rate: 23.6%\n"
-)
+def engine_log_line(prompt, generation, running):
+    return ("vllm=(APIServer pid=1222) INFO 09-17 18:27:24 [loggers.py:310] Engine 000: "
+            f"Avg prompt throughput: {prompt} tokens/s, Avg generation throughput: {generation} tokens/s, "
+            f"Running: {running} reqs, Waiting: 0 reqs, GPU KV cache usage: 7.0%, Prefix cache hit rate: 23.6%\n")
+
+
+FULL_OUTPUT = GPU_ONLY_OUTPUT + "model=nvidia/GLM-5.3-Flash-NVFP4\n" + engine_log_line(0.0, 14.6, 1)
+WINDOWED_OUTPUT = GPU_ONLY_OUTPUT + "model=nvidia/GLM-5.3-Flash-NVFP4\n" + "".join(
+    (engine_log_line(2740.0, 0.4, 2), engine_log_line(0.0, 114.0, 4), engine_log_line(0.0, 158.0, 4)))
 
 
 class ParseNodeMetricsTest(unittest.TestCase):
@@ -40,8 +43,15 @@ class ParseNodeMetricsTest(unittest.TestCase):
 
         self.assertEqual(metrics.gpu, GpuStatus(temperature_c=54, utilization_pct=0))
         self.assertEqual(metrics.model, "nvidia/GLM-5.3-Flash-NVFP4")
-        self.assertEqual(metrics.vllm.generation_throughput, 14.6)
+        self.assertEqual(metrics.vllm.mean_generation_throughput, 14.6)
         self.assertEqual(metrics.vllm.running, 1)
+
+    def test_averages_the_engine_log_window(self):
+        metrics = parse_node_metrics(WINDOWED_OUTPUT)
+
+        self.assertAlmostEqual(metrics.vllm.mean_generation_throughput, 90.8)
+        self.assertAlmostEqual(metrics.vllm.mean_prompt_throughput, 913.3333, places=3)
+        self.assertEqual(metrics.vllm.running, 4)
 
     def test_node_without_engine_reports_gpu_only(self):
         metrics = parse_node_metrics(GPU_ONLY_OUTPUT)
