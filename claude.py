@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import requests
 
 from accounts import account_file, account_from_argv
+from console_prompt import ask
 
 # --- Configuration ---
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -113,7 +114,7 @@ def interactive_auth(account: str) -> bool:
     print("3. After login, copy the FULL URL from the browser address bar.")
     print("   (It will look like http://localhost:18924/callback?code=...&state=...)\n")
 
-    callback_url = input("Paste the full callback URL here (or press Enter to disable): ").strip()
+    callback_url = ask("Paste the full callback URL here (or press Enter to disable): ")
 
     if not callback_url:
         print("Authorization cancelled. Claude widget is disabled.\n")

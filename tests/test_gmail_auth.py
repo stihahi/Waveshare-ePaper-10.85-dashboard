@@ -107,6 +107,19 @@ class InteractiveAuthTest(CredentialsTestCase):
             self.assertFalse(interactive_auth(self.credentials_path, self.token_path, SCOPES))
         prompt.assert_called_once()
 
+    def test_gives_up_without_crashing_when_no_console_is_attached(self):
+        credentials = stored_credentials(valid=False)
+        credentials.refresh.side_effect = gmail_auth.RefreshError("invalid_grant")
+        self.write_token()
+        self.patch_stored(credentials)
+        self.credentials_path.write_text(json.dumps({"installed": {"client_id": "x"}}))
+        flow = mock.MagicMock()
+        flow.authorization_url.return_value = ("https://accounts.google.com/o/oauth2/auth", "state")
+
+        with mock.patch.object(gmail_auth, "_create_flow", return_value=flow), \
+             mock.patch("builtins.input", side_effect=EOFError):
+            self.assertFalse(interactive_auth(self.credentials_path, self.token_path, SCOPES))
+
 
 if __name__ == '__main__':
     unittest.main()

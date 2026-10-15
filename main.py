@@ -110,9 +110,10 @@ from waveshare_epd_g import epd10in85g
 from panel_frame import PANEL_HEIGHT, PANEL_WIDTH, WHITE, build_frame
 from dgx_spark import GpuUnavailable, NodeMetrics, query_node_metrics
 from usage_status import claude_usage_failed, codex_usage_failed
+from console_prompt import ask
 import gmail_auth
-from usage_widgets import (draw_claude_accounts_widget, draw_codex_accounts_widget, draw_dgx_spark_widget,
-                           draw_usage_bar, draw_vllm_widget, time_until)
+from usage_widgets import (draw_dgx_spark_widget, draw_limit_accounts_widget, draw_usage_bar, draw_vllm_widget,
+                           time_until)
 
 try:
     import bambulabs_api as bl
@@ -339,13 +340,13 @@ def auth_strava():
         return
 
     print("\n--- STRAVA CONFIGURATION REQUIRED ---")
-    c_id = input("Enter Strava Client ID (or press Enter to disable): ").strip()
+    c_id = ask("Enter Strava Client ID (or press Enter to disable): ")
     if not c_id:
         print("Strava is disabled. Fallback widget (System Load) will be used.\n")
         ENABLE_STRAVA = False
         return
 
-    c_secret = input("Enter Strava Client Secret: ").strip()
+    c_secret = ask("Enter Strava Client Secret: ")
 
     auth_url = (
         f"{API_ENDPOINTS['strava_auth']}?"
@@ -361,7 +362,7 @@ def auth_strava():
     print("Click 'Authorize'. You will be redirected to an empty/error page (localhost).")
     print("Look at the address bar. Copy the 'code' parameter.")
 
-    code_input = input("Enter the 'code' from the URL (or paste the full URL): ").strip()
+    code_input = ask("Enter the 'code' from the URL (or paste the full URL): ")
 
     if not code_input:
         print("Authorization cancelled. Strava is disabled.\n")
@@ -486,7 +487,7 @@ def auth_roborock(email):
     async def _do_auth():
         web_api = RoborockApiClient(username=email)
         await web_api.request_code()
-        code = input(f"Enter 6-digit Roborock auth code sent to {email} (or press Enter to disable): ").strip()
+        code = ask(f"Enter 6-digit Roborock auth code sent to {email} (or press Enter to disable): ")
         if not code: return None
         user_data = await web_api.code_login(code)
         with open(ROBOROCK_TOKEN_FILE, "wb") as f: pickle.dump(user_data, f)
@@ -890,7 +891,7 @@ def render_screen(fonts):
     # Widget 2: Claude, Bambu or Crypto
     y2 = 170
     if ENABLE_CLAUDE:
-        draw_claude_accounts_widget(draw, fonts, col1_x, y2, claude)
+        draw_limit_accounts_widget(draw, fonts, col1_x, y2, "CLAUDE USAGE", claude)
     elif ENABLE_BAMBU:
         p_status = str(printer.get('status', 'OFFLINE')).upper()
         draw_icon(draw, col1_x, y2, "icon_3d", (60, 60))
@@ -950,7 +951,7 @@ def render_screen(fonts):
 
                     y_off += 50
     elif ENABLE_CODEX:
-        draw_codex_accounts_widget(draw, fonts, col1_x, y3, codex)
+        draw_limit_accounts_widget(draw, fonts, col1_x, y3, "CODEX USAGE", codex)
     else:
         draw_icon(draw, col1_x, y3, "icon_wifi", (50, 50))
         draw.text((col1_x + 60, y3), f"Internet Quality: {ping['current']} ms", font=fonts['28'], fill=0)

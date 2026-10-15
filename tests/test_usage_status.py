@@ -27,8 +27,14 @@ class CodexUsageFailedTest(unittest.TestCase):
     def test_negative_utilization_marks_failure(self):
         self.assertTrue(codex_usage_failed({"seven_day": {"utilization": -1.0, "resets_at": None}}))
 
-    def test_missing_seven_day_is_failure(self):
-        self.assertTrue(codex_usage_failed({"five_hour": WINDOW}))
+    def test_a_plan_without_a_five_hour_window_is_not_failure(self):
+        self.assertFalse(codex_usage_failed({"five_hour": None, "seven_day": WINDOW}))
+
+    def test_a_plan_without_a_weekly_window_is_not_failure(self):
+        self.assertFalse(codex_usage_failed({"five_hour": WINDOW, "seven_day": None}))
+
+    def test_no_window_at_all_is_failure(self):
+        self.assertTrue(codex_usage_failed({"five_hour": None, "seven_day": None}))
 
     def test_missing_file_is_failure(self):
         self.assertTrue(codex_usage_failed(None))
