@@ -9,6 +9,8 @@ import logging
 import datetime
 from pathlib import Path
 
+from console_prompt import ask
+
 # Setup logging (file and console)
 SCRIPT_DIR = Path(__file__).parent.resolve()
 LOG_FILE = SCRIPT_DIR / "limits.log"
@@ -131,7 +133,7 @@ def interactive_auth() -> bool:
     print("3. You will be redirected to a dead localhost URL.")
     print("4. Copy the ENTIRE localhost redirect URL and paste it below.\n")
     
-    pasted_url = input('Paste the full localhost redirect URL here (or press Enter to disable): ').strip()
+    pasted_url = ask('Paste the full localhost redirect URL here (or press Enter to disable): ')
     if not pasted_url:
         print("Authorization cancelled. Antigravity widget is disabled.\n")
         return False

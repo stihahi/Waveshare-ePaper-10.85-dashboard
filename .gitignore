@@ -6,6 +6,7 @@ codex_auth*.json
 auth.json
 strava_token.json
 roborock_session.pkl
+*.revoked
 
 # Personal config: home coordinates and DGX Spark hosts
 local_config.json

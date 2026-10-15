@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from dgx_spark import GpuUnavailable
 from panel_frame import BLACK, RED, YELLOW
+from usage_status import LIMIT_WINDOWS
 
 WARNING_USAGE_PCT = 60
 DANGER_USAGE_PCT = 80
@@ -86,34 +87,26 @@ def _short_model_name(model):
     return model.rsplit("/", 1)[-1]
 
 
-def draw_claude_accounts_widget(draw, fonts, x, y, usages):
-    draw.text((x, y), "CLAUDE USAGE  5h / 7d", font=fonts['28'], fill=BLACK)
+def draw_limit_accounts_widget(draw, fonts, x, y, title, usages):
+    draw.text((x, y), f"{title}  5h / 7d", font=fonts['28'], fill=BLACK)
     for row, (account, usage) in enumerate(usages.items()):
-        row_y = y + 40 + row * ROW_SPACING
-        draw.text((x, row_y + 6), account, font=fonts['20'], fill=BLACK)
-        if usage.get('error'):
-            draw.text((x + ACCOUNT_LABEL_WIDTH, row_y + 6), "Usage Error", font=fonts['20'], fill=BLACK)
-            continue
-        for column, window in enumerate(('five_hour', 'seven_day')):
-            column_x = x + ACCOUNT_LABEL_WIDTH + column * (WINDOW_COLUMN_WIDTH + WINDOW_COLUMN_GAP)
-            _draw_limit_window(draw, fonts, column_x, row_y, usage.get(window, {}))
+        _draw_account_limits(draw, fonts, x, y + 40 + row * ROW_SPACING, account, usage)
 
 
-def draw_codex_accounts_widget(draw, fonts, x, y, usages):
-    draw.text((x, y), "CODEX USAGE  7-day", font=fonts['28'], fill=BLACK)
-    for row, (account, usage) in enumerate(usages.items()):
-        row_y = y + 40 + row * ROW_SPACING
-        if usage.get('error'):
-            draw.text((x, row_y), f"{account}  Usage Error", font=fonts['20'], fill=BLACK)
-            continue
-        window = usage.get('seven_day', {})
-        pct = window.get('utilization', 0)
-        draw.text((x, row_y), f"{account}  {round(pct)}%  (in {time_until(window.get('resets_at'))})",
-                  font=fonts['20'], fill=BLACK)
-        draw_usage_bar(draw, x, row_y + 26, 400, pct)
+def _draw_account_limits(draw, fonts, x, y, account, usage):
+    draw.text((x, y + 6), account, font=fonts['20'], fill=BLACK)
+    if usage.get('error'):
+        draw.text((x + ACCOUNT_LABEL_WIDTH, y + 6), "Usage Error", font=fonts['20'], fill=BLACK)
+        return
+    for column, window_name in enumerate(LIMIT_WINDOWS):
+        column_x = x + ACCOUNT_LABEL_WIDTH + column * (WINDOW_COLUMN_WIDTH + WINDOW_COLUMN_GAP)
+        _draw_limit_window(draw, fonts, column_x, y, usage.get(window_name))
 
 
 def _draw_limit_window(draw, fonts, x, y, window):
+    if window is None:
+        draw.text((x, y + 6), "not reported", font=fonts['20'], fill=BLACK)
+        return
     pct = window.get('utilization', 0)
     draw.text((x, y), f"{round(pct)}% {time_until(window.get('resets_at'))}", font=fonts['20'], fill=BLACK)
     draw_usage_bar(draw, x, y + 26, WINDOW_COLUMN_WIDTH, pct)

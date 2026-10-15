@@ -8,6 +8,8 @@ from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
+from console_prompt import ask
+
 LOOPBACK_REDIRECT_URI = "http://localhost"
 
 
@@ -67,7 +69,7 @@ def _prompt_for_callback(flow):
     print("2. Log in and allow read-only Gmail access.")
     print("3. The browser ends on an unreachable http://localhost/?...code=... page.")
     print("   Copy that FULL URL from the address bar.\n")
-    return input("Paste the full callback URL here (or press Enter to skip): ").strip()
+    return ask("Paste the full callback URL here (or press Enter to skip): ")
 
 
 def _save_token(flow, callback_url, token_path):

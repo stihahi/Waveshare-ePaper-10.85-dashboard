@@ -426,9 +426,9 @@ def percent_direct(value: Any) -> Optional[float]:
         return None
 
 
-def normalize_window(window: Any) -> dict[str, Any]:
+def normalize_window(window: Any) -> Optional[dict[str, Any]]:
     if not isinstance(window, dict):
-        return {"utilization": 0.0, "resets_at": None}
+        return None
 
     # WHAM commonly reports remaining/available quota as percent_left or
     # remaining_percent. The dashboard expects Claude-style utilization
@@ -535,7 +535,7 @@ def window_duration_seconds(window: Any) -> Optional[float]:
     return None
 
 
-def map_named_windows(primary: Any, secondary: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+def map_named_windows(primary: Any, secondary: Any) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
     """Map server window names to five-hour/seven-day by actual duration.
 
     WHAM historically used primary_window for five hours and secondary_window
@@ -579,8 +579,8 @@ def map_named_windows(primary: Any, secondary: Any) -> tuple[dict[str, Any], dic
     return normalize_window(five), normalize_window(seven)
 
 
-def extract_limits(raw: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Map undocumented WHAM usage response to five_hour/seven_day."""
+def extract_limits(raw: dict[str, Any]) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    """Map undocumented WHAM usage response to five_hour/seven_day; None when the plan has no such window."""
     rate_limit = find_first_key(raw, ("rate_limit", "rateLimit", "rate_limits", "rateLimits"))
 
     # Most direct WHAM shape: rate_limit.primary_window / secondary_window.
@@ -669,6 +669,12 @@ def update_once(files: CodexAccountFiles) -> dict[str, Any]:
     return payload
 
 
+def describe_window(window: Optional[dict[str, Any]]) -> str:
+    if window is None:
+        return "not reported"
+    return f"{window['utilization']}% reset={window['resets_at']}"
+
+
 def main() -> int:
     # --once: do a single update and exit. The dashboard polls this script
     # periodically (like it does claude.py), so it must not run as a daemon
@@ -686,12 +692,10 @@ def main() -> int:
         started = time.time()
         try:
             payload = update_once(files)
-            five = payload["five_hour"]
-            seven = payload["seven_day"]
             log(
                 "Limits updated: "
-                f"five_hour={five['utilization']}% reset={five['resets_at']}; "
-                f"seven_day={seven['utilization']}% reset={seven['resets_at']}"
+                f"five_hour={describe_window(payload['five_hour'])}; "
+                f"seven_day={describe_window(payload['seven_day'])}"
             )
         except KeyboardInterrupt:
             log("Monitor stopped.")
