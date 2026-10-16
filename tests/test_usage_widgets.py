@@ -5,6 +5,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
+from usage_status import UsageProblem
 from usage_widgets import draw_limit_accounts_widget
 
 FONTS = {'20': 'font-20', '28': 'font-28'}
@@ -34,9 +35,14 @@ class DrawLimitAccountsWidgetTest(unittest.TestCase):
         self.assertIn("16% N/A", texts)
 
     def test_shows_an_error_instead_of_windows_when_the_fetch_failed(self):
-        texts = drawn_texts({"main": {"error": True}})
+        texts = drawn_texts({"main": {"problem": UsageProblem.FETCH_FAILED}})
 
         self.assertEqual(texts[1:], ["main", "Usage Error"])
+
+    def test_asks_for_a_new_login_when_the_login_expired(self):
+        texts = drawn_texts({"sub": {"problem": UsageProblem.LOGIN_EXPIRED}})
+
+        self.assertEqual(texts[1:], ["sub", "Re-login needed"])
 
 
 if __name__ == '__main__':

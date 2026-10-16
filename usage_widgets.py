@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from dgx_spark import GpuUnavailable
 from panel_frame import BLACK, RED, YELLOW
-from usage_status import LIMIT_WINDOWS
+from usage_status import LIMIT_WINDOWS, UsageProblem
 
 WARNING_USAGE_PCT = 60
 DANGER_USAGE_PCT = 80
@@ -12,6 +12,10 @@ ACCOUNT_LABEL_WIDTH = 75
 WINDOW_COLUMN_WIDTH = 160
 WINDOW_COLUMN_GAP = 10
 ROW_SPACING = 48
+PROBLEM_LABELS = {
+    UsageProblem.LOGIN_EXPIRED: "Re-login needed",
+    UsageProblem.FETCH_FAILED: "Usage Error",
+}
 
 
 def time_until(iso_str):
@@ -95,8 +99,9 @@ def draw_limit_accounts_widget(draw, fonts, x, y, title, usages):
 
 def _draw_account_limits(draw, fonts, x, y, account, usage):
     draw.text((x, y + 6), account, font=fonts['20'], fill=BLACK)
-    if usage.get('error'):
-        draw.text((x + ACCOUNT_LABEL_WIDTH, y + 6), "Usage Error", font=fonts['20'], fill=BLACK)
+    problem = usage.get('problem')
+    if problem:
+        draw.text((x + ACCOUNT_LABEL_WIDTH, y + 6), PROBLEM_LABELS[problem], font=fonts['20'], fill=BLACK)
         return
     for column, window_name in enumerate(LIMIT_WINDOWS):
         column_x = x + ACCOUNT_LABEL_WIDTH + column * (WINDOW_COLUMN_WIDTH + WINDOW_COLUMN_GAP)
