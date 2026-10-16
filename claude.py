@@ -16,6 +16,7 @@ import requests
 
 from accounts import account_file, account_from_argv
 from console_prompt import ask
+from usage_status import REJECTED_REFRESH_STATUSES, LoginExpired, UsageProblem, error_payload
 
 # --- Configuration ---
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -30,15 +31,18 @@ SCOPES = "user:inference user:profile"
 REFRESH_BUFFER_SEC = 600
 USER_AGENT = "claude-code/2.0.32"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
 log = logging.getLogger(__name__)
+
+
+def configure_logging(account: str):
+    logging.basicConfig(
+        level=logging.INFO,
+        format=f"%(asctime)s [%(levelname)s] [{account}] %(message)s",
+        handlers=[
+            logging.FileHandler(LOG_FILE),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
 
 
 @dataclass(frozen=True)
@@ -180,6 +184,8 @@ def refresh_access_token(creds: dict, files: ClaudeAccountFiles) -> dict | None:
     }
     try:
         resp = requests.post(TOKEN_URL, json=payload, timeout=15)
+        if resp.status_code in REJECTED_REFRESH_STATUSES:
+            raise LoginExpired(f"Token refresh rejected: {resp.status_code} {resp.text}")
         if resp.status_code != 200:
             log.error(f"Token refresh failed: {resp.status_code} {resp.text}")
             return None
@@ -237,33 +243,45 @@ def save_usage(raw: dict, files: ClaudeAccountFiles):
     files.usage.write_text(json.dumps(output, indent=2))
 
 
-def save_usage_error(reason: str, files: ClaudeAccountFiles):
-    files.usage.write_text(json.dumps({"error": reason}, indent=2))
+def save_usage_error(problem: UsageProblem, files: ClaudeAccountFiles):
+    files.usage.write_text(json.dumps(error_payload(problem), indent=2))
 
 
-def main():
-    files = account_files(account_from_argv(sys.argv))
-    creds = load_credentials(files)
-    if not creds:
-        log.error("No credentials. Run main script to authenticate first.")
-        sys.exit(1)
-
+def fetch_usage_refreshing(creds: dict, files: ClaudeAccountFiles) -> dict | None:
     if token_is_expired(creds):
         creds = refresh_access_token(creds, files)
         if not creds:
-            save_usage_error("token_refresh_failed", files)
-            sys.exit(1)
+            return None
 
     raw = fetch_usage(creds.get("accessToken"))
     if raw is None:
         creds = refresh_access_token(creds, files)
         if creds:
             raw = fetch_usage(creds.get("accessToken"))
+    return raw
+
+
+def main():
+    account = account_from_argv(sys.argv)
+    configure_logging(account)
+    files = account_files(account)
+    creds = load_credentials(files)
+    if not creds:
+        log.error("No credentials. Run main script to authenticate first.")
+        save_usage_error(UsageProblem.LOGIN_EXPIRED, files)
+        sys.exit(1)
+
+    try:
+        raw = fetch_usage_refreshing(creds, files)
+    except LoginExpired as expired:
+        log.error(f"{expired}. Log in again for this account.")
+        save_usage_error(UsageProblem.LOGIN_EXPIRED, files)
+        sys.exit(1)
 
     if raw:
         save_usage(raw, files)
     else:
-        save_usage_error("fetch_failed", files)
+        save_usage_error(UsageProblem.FETCH_FAILED, files)
 
 
 if __name__ == "__main__":

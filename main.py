@@ -109,7 +109,7 @@ if os.path.exists(LIB_DIR):
 from waveshare_epd_g import epd10in85g
 from panel_frame import PANEL_HEIGHT, PANEL_WIDTH, WHITE, build_frame
 from dgx_spark import GpuUnavailable, NodeMetrics, query_node_metrics
-from usage_status import claude_usage_failed, codex_usage_failed
+from usage_status import UsageProblem, usage_problem
 from console_prompt import ask
 import gmail_auth
 from usage_widgets import (draw_dgx_spark_widget, draw_limit_accounts_widget, draw_usage_bar, draw_vllm_widget,
@@ -224,9 +224,9 @@ class DataStore:
         self.printer = {'status': 'OFFLINE'}
         self.gmail_unread = 0
         self.spotify = {'status': 'PAUSED', 'text': '', 'cover': None}
-        self.claude = {account: {'error': True} for account in CLAUDE_ACCOUNTS}
+        self.claude = {account: {'problem': UsageProblem.FETCH_FAILED} for account in CLAUDE_ACCOUNTS}
         self.antigravity = {'error': False, 'models': []}
-        self.codex = {account: {'error': True} for account in CODEX_ACCOUNTS}
+        self.codex = {account: {'problem': UsageProblem.FETCH_FAILED} for account in CODEX_ACCOUNTS}
         self.dgx_spark = {label: NodeMetrics(gpu=GpuUnavailable.PENDING) for label in DGX_SPARK_HOSTS}
         self.roborock = {
             'status': 'OFFLINE', 'battery': 0, 'is_cleaning': False,
@@ -284,13 +284,13 @@ def read_json_file(path):
         return None
 
 
-def fetch_account_usage(script_args, account, usage_path, failed):
+def fetch_account_usage(script_args, account, usage_path):
     try:
         subprocess.run([sys.executable, *script_args, '--account', account], capture_output=True, timeout=30)
     except subprocess.TimeoutExpired:
         logging.error(f"{script_args[0]} timed out for account {account}")
     usage = read_json_file(usage_path)
-    return {**(usage or {}), 'error': failed(usage)}
+    return {**(usage or {}), 'problem': usage_problem(usage)}
 
 
 # --- AUTH & FETCH THREADS ---
@@ -702,7 +702,7 @@ def update_data_thread():
             import claude
             for account in CLAUDE_ACCOUNTS:
                 usage = fetch_account_usage([os.path.join(BASE_DIR, 'claude.py')], account,
-                                            claude.account_files(account).usage, claude_usage_failed)
+                                            claude.account_files(account).usage)
                 with data_store.lock: data_store.claude[account] = usage
             data_store.last_update['claude'] = now
 
@@ -710,7 +710,7 @@ def update_data_thread():
             import codex
             for account in CODEX_ACCOUNTS:
                 usage = fetch_account_usage([os.path.join(BASE_DIR, 'codex.py'), '--once'], account,
-                                            codex.account_files(account).usage, codex_usage_failed)
+                                            codex.account_files(account).usage)
                 with data_store.lock: data_store.codex[account] = usage
             data_store.last_update['codex'] = now
 

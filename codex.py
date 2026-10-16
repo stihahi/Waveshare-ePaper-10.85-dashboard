@@ -43,6 +43,7 @@ from typing import Any, Optional
 import requests
 
 from accounts import account_file, account_from_argv
+from usage_status import REJECTED_REFRESH_STATUSES, LoginExpired, UsageProblem, error_payload
 
 
 # ── Configuration ──────────────────────────────────────────────────────────
@@ -67,12 +68,14 @@ class FatalError(RuntimeError):
 
 @dataclass(frozen=True)
 class CodexAccountFiles:
+    account: str
     auth: Path
     usage: Path
 
 
 def account_files(account: str) -> CodexAccountFiles:
     return CodexAccountFiles(
+        account=account,
         auth=account_file("codex_auth", account),
         usage=account_file("codex_usage", account),
     )
@@ -108,15 +111,10 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def write_usage_error(reason: str, files: CodexAccountFiles) -> None:
-    payload = {
-        "updated_at": iso_now(),
-        "five_hour": {"utilization": -1.0, "resets_at": None},
-        "seven_day": {"utilization": -1.0, "resets_at": None},
-    }
-    write_json(files.usage, payload)
-    append_log(f"ERROR: {reason}")
-    log_error(f"Could not update limits: {reason}")
+def write_usage_error(problem: UsageProblem, reason: str, files: CodexAccountFiles) -> None:
+    write_json(files.usage, error_payload(problem))
+    append_log(f"[{files.account}] ERROR: {reason}")
+    log_error(f"[{files.account}] Could not update limits: {reason}")
 
 
 # ── auth file helpers ─────────────────────────────────────────────────────
@@ -262,8 +260,10 @@ def refresh_tokens(auth: dict[str, Any], files: CodexAccountFiles) -> dict[str, 
     except requests.RequestException as exc:
         raise FatalError(f"token refresh network error: {exc}") from exc
 
+    body = resp.text[:1000]
+    if resp.status_code in REJECTED_REFRESH_STATUSES:
+        raise LoginExpired(f"token refresh rejected: HTTP {resp.status_code}: {body}")
     if resp.status_code != 200:
-        body = resp.text[:1000]
         raise FatalError(f"token refresh failed: HTTP {resp.status_code}: {body}")
 
     try:
@@ -655,7 +655,7 @@ def update_once(files: CodexAccountFiles) -> dict[str, Any]:
     try:
         raw = fetch_usage(auth)
     except PermissionError as exc:
-        append_log(f"Usage request failed with auth error; refreshing once and retrying. {exc}")
+        append_log(f"[{files.account}] Usage request failed with auth error; refreshing once and retrying. {exc}")
         auth = refresh_tokens(auth, files)
         raw = fetch_usage(auth)
 
@@ -685,7 +685,7 @@ def main() -> int:
     if not run_once:
         log("Starting direct ChatGPT/Codex limits monitor. Updates every 60 seconds.")
     if not files.auth.exists():
-        write_usage_error(f"auth file was not found next to the script: {files.auth}", files)
+        write_usage_error(UsageProblem.LOGIN_EXPIRED, f"auth file was not found next to the script: {files.auth}", files)
         return 1
 
     while True:
@@ -700,8 +700,10 @@ def main() -> int:
         except KeyboardInterrupt:
             log("Monitor stopped.")
             return 130
+        except LoginExpired as exc:
+            write_usage_error(UsageProblem.LOGIN_EXPIRED, f"{exc}. Log in again for this account.", files)
         except Exception as exc:
-            write_usage_error(str(exc), files)
+            write_usage_error(UsageProblem.FETCH_FAILED, str(exc), files)
 
         if run_once:
             return 0

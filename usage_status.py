@@ -1,13 +1,33 @@
+from enum import Enum
+
 LIMIT_WINDOWS = ("five_hour", "seven_day")
-FAILED_UTILIZATION = -1.0  # what codex.py writes when it could not fetch the limits
+REJECTED_REFRESH_STATUSES = (400, 401)
 
 
-def claude_usage_failed(usage):
-    return usage is None or ("error" in usage and "five_hour" not in usage)
+class UsageProblem(Enum):
+    LOGIN_EXPIRED = "login_expired"
+    FETCH_FAILED = "fetch_failed"
 
 
-def codex_usage_failed(usage):
-    if usage is None or usage.get("error"):
-        return True
-    reported = [usage[name] for name in LIMIT_WINDOWS if usage.get(name) is not None]
-    return not reported or any(window.get("utilization", FAILED_UTILIZATION) < 0 for window in reported)
+class LoginExpired(Exception):
+    """The auth server rejected the stored refresh token; only a new login fixes it."""
+
+
+def error_payload(problem):
+    return {"error": problem.value}
+
+
+def usage_problem(usage):
+    if usage is None:
+        return UsageProblem.FETCH_FAILED
+    if "error" in usage:
+        return _problem_named(usage["error"])
+    if all(usage.get(name) is None for name in LIMIT_WINDOWS):
+        return UsageProblem.FETCH_FAILED
+    return None
+
+
+def _problem_named(error):
+    if error == UsageProblem.LOGIN_EXPIRED.value:
+        return UsageProblem.LOGIN_EXPIRED
+    return UsageProblem.FETCH_FAILED
